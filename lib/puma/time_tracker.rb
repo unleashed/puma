@@ -36,5 +36,9 @@ module Puma
     def to(q, now = Time.now)
       @seqs.last.to q, now
     end
+
+    def into(q, &blk)
+      @seqs.last.into q, &blk
+    end
   end
 end

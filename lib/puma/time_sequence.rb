@@ -17,6 +17,14 @@ module Puma
       current << q
     end
 
+    def into(q, next_state: nil, &blk)
+      current = next_state || @inner[:current].last
+      to q, Time.now
+      blk.call
+    ensure
+      to current, Time.now
+    end
+
     def close(now = Time.now)
       @closed = true
       @inner[@inner[:current].last].last << now
