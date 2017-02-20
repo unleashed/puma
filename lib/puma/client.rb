@@ -60,6 +60,14 @@ module Puma
 
     attr_reader :created, :finished, :resets, :requests_served, :last_reset, :t
 
+    def to(s)
+      @t.to s
+    end
+
+    def into(s, **opts, &blk)
+      @t.into(s, **opts, &blk)
+    end
+
     def inspect
       "#<Puma::Client:0x#{object_id.to_s(16)} @created=#{@created.inspect} @finished=#{@finished.inspect} @resets=#{@resets} @requests_served=#{@requests_served} @last_reset=#{last_reset.inspect} @timeout_at=#{@timeout_at.inspect} @ready=#{@ready.inspect} @t=#{@t.inspect}>"
     end
@@ -115,7 +123,7 @@ module Puma
     def close
       @finished = Time.now
       begin
-        @t.into(:close) { @io.close }
+        @t.into(:close, next_state: :idle) { @io.close }
       rescue IOError
       end
     end
@@ -185,7 +193,7 @@ module Puma
 
       @parsed_bytes = @t.into(:parser_execute) { @parser.execute(@env, @buffer, @parsed_bytes) }
 
-      if @parser.finished?
+      if @t.into(:parser_finished) { @parser.finished? }
         return setup_body
       elsif @parsed_bytes >= MAX_HEADER
         raise HttpParserError,
@@ -240,13 +248,13 @@ module Puma
       def eagerly_finish
         return true if @ready
         return false unless @t.into(:select_eager) { IO.select([@to_io], nil, nil, 0) }
-        try_to_finish
+        @t.into(:try_to_finish) { try_to_finish }
       end
     end # IS_JRUBY
 
     def finish
       return true if @ready
-      until try_to_finish
+      until @t.into(:try_to_finish) { try_to_finish }
         @t.into(:select) { IO.select([@to_io], nil, nil) }
       end
       true
