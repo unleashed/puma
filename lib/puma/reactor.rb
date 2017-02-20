@@ -147,6 +147,7 @@ module Puma
     ensure
       @trigger.close
       @ready.close
+      @t.stop
     end
 
     def run_in_thread
@@ -162,6 +163,7 @@ module Puma
           @t.to :closing
           @trigger.close
           @ready.close
+	  @t.stop
         end
       end
     end
