@@ -5,6 +5,7 @@ module Puma
     def initialize(initial_state)
       @initial_state = initial_state
       @seqs = []
+      @stop_blk = block_given? ? Proc.new : lambda { |tt| tt.log(STDERR) if tt.all_time > 0.1 }
     end
 
     def start(state: nil, now: Time.now)
@@ -13,6 +14,7 @@ module Puma
 
     def stop(now = Time.now)
       @seqs.last.close now
+      @stop_blk.call self
     end
 
     def reset(state: nil, now: Time.now)
