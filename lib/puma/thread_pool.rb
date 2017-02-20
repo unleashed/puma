@@ -40,6 +40,8 @@ module Puma
       end
 
       @clean_thread_locals = false
+      @t = TimeTracker.new :idle
+      @t.start
     end
 
     attr_reader :spawned, :trim_requested
@@ -48,7 +50,7 @@ module Puma
     # How many objects have yet to be processed by the pool?
     #
     def backlog
-      @mutex.synchronize { @todo.size }
+      @t.into(:backlog) { @mutex.synchronize { @todo.size } }
     end
 
     # :nodoc:
@@ -64,6 +66,8 @@ module Puma
         mutex = @mutex
         not_empty = @not_empty
         not_full = @not_full
+        t = TimeTracker.new :idle
+        t.start
 
         extra = @extra.map { |i| i.new }
 
@@ -72,7 +76,9 @@ module Puma
 
           continue = true
 
+          t.into(:mutex_lock, next_state: :idle) do
           mutex.synchronize do
+            t.to :mutex_grabbed
             while todo.empty?
               if @trim_requested > 0
                 @trim_requested -= 1
@@ -87,31 +93,38 @@ module Puma
 
               @waiting += 1
               not_full.signal
-              not_empty.wait mutex
+              t.into(:not_empty_wait) { not_empty.wait mutex }
               @waiting -= 1
             end
 
             work = todo.shift if continue
           end
+          end
 
           break unless continue
 
           if @clean_thread_locals
+            t.into(:clean_tls) do
             Thread.current.keys.each do |key|
               Thread.current[key] = nil unless key == :__recursive_key__
+            end
             end
           end
 
           begin
-            block.call(work, *extra)
+            t.into(:working) { block.call(work, *extra) }
           rescue Exception
           end
         end
 
+        t.into(:worker_delete) do
         mutex.synchronize do
           @spawned -= 1
           @workers.delete th
         end
+        end
+
+        t.stop
       end
 
       @workers << th
@@ -123,7 +136,9 @@ module Puma
 
     # Add +work+ to the todo list for a Thread to pickup and process.
     def <<(work)
+      @t.into(:add_work_mutex_wait) do
       @mutex.synchronize do
+        @t.to(:add_work)
         if @shutdown
           raise "Unable to add work while shutting down"
         end
@@ -131,10 +146,11 @@ module Puma
         @todo << work
 
         if @waiting < @todo.size and @spawned < @max
-          spawn_thread
+          @to.into(:spawn_thread) { spawn_thread }
         end
 
         @not_empty.signal
+      end
       end
     end
 
@@ -250,6 +266,7 @@ module Puma
 
       @spawned = 0
       @workers = []
+      @t.stop
     end
   end
 end
