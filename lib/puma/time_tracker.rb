@@ -37,8 +37,8 @@ module Puma
       @seqs.last.to q, now
     end
 
-    def into(q, &blk)
-      @seqs.last.into q, &blk
+    def into(q, **opts, &blk)
+      @seqs.last.into q, **opts, &blk
     end
   end
 end
