@@ -125,6 +125,9 @@ module Puma
       begin
         @t.into(:close, next_state: :idle) { @io.close }
       rescue IOError
+      ensure
+        @t.stop @finished
+        @t.start @finished
       end
     end
 
