@@ -33,6 +33,16 @@ module Puma
       end
     end
 
+    def log(out=STDOUT)
+      out.puts("*** SLOW ***\n\n#{all_totals.inspect}\n!!!!!!")
+    end
+
+    def all_time
+      all_totals.inject(0.0) do |acc, (h, k)|
+        acc += k
+      end
+    end
+
     def to(q, now = Time.now)
       @seqs.last.to q, now
     end
