@@ -23,6 +23,13 @@ module Puma
     include Puma::Const
 
     def initialize(io, env=nil)
+      @created = Time.now
+      @finished = nil
+      @last_reset = @created
+      @resets = 0
+      @t = TimeTracker.new :cpu
+      @t.start @created
+
       @io = io
       @to_io = io.to_io
       @proto_env = env
@@ -45,13 +52,16 @@ module Puma
 
       @requests_served = 0
       @hijacked = false
+      @t.to :idle
     end
 
     attr_reader :env, :to_io, :body, :io, :timeout_at, :ready, :hijacked,
                 :tempfile
 
+    attr_reader :created, :finished, :resets, :requests_served, :last_reset, :t
+
     def inspect
-      "#<Puma::Client:0x#{object_id.to_s(16)} @ready=#{@ready.inspect}>"
+      "#<Puma::Client:0x#{object_id.to_s(16)} @created=#{@created.inspect} @finished=#{@finished.inspect} @resets=#{@resets} @requests_served=#{@requests_served} @last_reset=#{last_reset.inspect} @timeout_at=#{@timeout_at.inspect} @ready=#{@ready.inspect} @t=#{@t.inspect}>"
     end
 
     # For the hijack protocol (allows us to just put the Client object
@@ -70,6 +80,12 @@ module Puma
     end
 
     def reset(fast_check=true)
+      @t.to :reset
+      @last_reset = Time.now
+      @resets += 1
+      @t.stop @last_reset
+      @t.start @last_reset
+
       @parser.reset
       @read_header = true
       @env = @proto_env.dup
@@ -79,25 +95,27 @@ module Puma
       @ready = false
 
       if @buffer
-        @parsed_bytes = @parser.execute(@env, @buffer, @parsed_bytes)
+        @parsed_bytes = @t.into(:parser_execute) { @parser.execute(@env, @buffer, @parsed_bytes) }
 
-        if @parser.finished?
-          return setup_body
+        if @t.into(:parser_finished) { @parser.finished? }
+          return @t.into(:setup_body, next_state: :idle) { setup_body }
         elsif @parsed_bytes >= MAX_HEADER
           raise HttpParserError,
             "HEADER is longer than allowed, aborting client early."
         end
 
+        @t.to :idle
         return false
       elsif fast_check &&
-            IO.select([@to_io], nil, nil, FAST_TRACK_KA_TIMEOUT)
-        return try_to_finish
+            @t.into(:fast_ka) { IO.select([@to_io], nil, nil, FAST_TRACK_KA_TIMEOUT) }
+        return @t.into(:try_to_finish, next_state: :idle) { try_to_finish }
       end
     end
 
     def close
+      @finished = Time.now
       begin
-        @io.close
+        @t.into(:close) { @io.close }
       rescue IOError
       end
     end
@@ -108,7 +126,7 @@ module Puma
 
     def setup_body
       @in_data_phase = true
-      body = @parser.body
+      body = @t.into(:parser_body) { @parser.body }
       cl = @env[CONTENT_LENGTH]
 
       unless cl
@@ -130,7 +148,7 @@ module Puma
       end
 
       if remain > MAX_BODY
-        @body = Tempfile.new(Const::PUMA_TMP_BASE)
+        @body = @t.into(:tempfile) { Tempfile.new(Const::PUMA_TMP_BASE) }
         @body.binmode
         @tempfile = @body
       else
@@ -139,7 +157,7 @@ module Puma
         @body = StringIO.new body[0,0]
       end
 
-      @body.write body
+      @t.into(:body_write) { @body.write body }
 
       @body_remain = remain
 
@@ -152,7 +170,7 @@ module Puma
       return read_body unless @read_header
 
       begin
-        data = @io.read_nonblock(CHUNK_SIZE)
+        data = @t.into(:read_nonblock) { @io.read_nonblock(CHUNK_SIZE) }
       rescue Errno::EAGAIN
         return false
       rescue SystemCallError, IOError
@@ -165,7 +183,7 @@ module Puma
         @buffer = data
       end
 
-      @parsed_bytes = @parser.execute(@env, @buffer, @parsed_bytes)
+      @parsed_bytes = @t.into(:parser_execute) { @parser.execute(@env, @buffer, @parsed_bytes) }
 
       if @parser.finished?
         return setup_body
@@ -221,7 +239,7 @@ module Puma
 
       def eagerly_finish
         return true if @ready
-        return false unless IO.select([@to_io], nil, nil, 0)
+        return false unless @t.into(:select_eager) { IO.select([@to_io], nil, nil, 0) }
         try_to_finish
       end
     end # IS_JRUBY
@@ -229,7 +247,7 @@ module Puma
     def finish
       return true if @ready
       until try_to_finish
-        IO.select([@to_io], nil, nil)
+        @t.into(:select) { IO.select([@to_io], nil, nil) }
       end
       true
     end
@@ -246,7 +264,7 @@ module Puma
       end
 
       begin
-        chunk = @io.read_nonblock(want)
+        chunk = @t.into(:read_nonblock) { @io.read_nonblock(want) }
       rescue Errno::EAGAIN
         return false
       rescue SystemCallError, IOError
@@ -255,17 +273,17 @@ module Puma
 
       # No chunk means a closed socket
       unless chunk
-        @body.close
+        @t.into(:body_close) { @body.close }
         @buffer = nil
         @requests_served += 1
         @ready = true
         raise EOFError
       end
 
-      remain -= @body.write(chunk)
+      remain -= @t.into(:body_write) { @body.write(chunk) }
 
       if remain <= 0
-        @body.rewind
+        @t.into(:body_rewind) { @body.rewind }
         @buffer = nil
         @requests_served += 1
         @ready = true
@@ -279,21 +297,21 @@ module Puma
 
     def write_400
       begin
-        @io << ERROR_400_RESPONSE
+        @t.into(:write) { @io << ERROR_400_RESPONSE }
       rescue StandardError
       end
     end
 
     def write_408
       begin
-        @io << ERROR_408_RESPONSE
+        @t.into(:write) { @io << ERROR_408_RESPONSE }
       rescue StandardError
       end
     end
 
     def write_500
       begin
-        @io << ERROR_500_RESPONSE
+        @t.into(:write) { @io << ERROR_500_RESPONSE }
       rescue StandardError
       end
     end
